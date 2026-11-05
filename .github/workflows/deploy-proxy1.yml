@@ -1,0 +1,170 @@
+name: Build & Deploy to AWS proxy-1
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_tags:
+        description: "Go build tags for sing-box"
+        required: false
+        default: "with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,badlinkname,tfogo_checklinkname0"
+        type: string
+  push:
+    branches:
+      - testing
+    paths:
+      - ".github/workflows/deploy-proxy1.yml"
+      - "cmd/**"
+      - "protocol/**"
+      - "option/**"
+      - "common/**"
+      - "transport/**"
+      - "go.mod"
+      - "go.sum"
+
+concurrency:
+  group: deploy-proxy1-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    name: Build linux-amd64 & Deploy to proxy-1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build sing-box (linux/amd64)
+        env:
+          INPUT_TAGS: ${{ inputs.build_tags }}
+        run: |
+          set -euo pipefail
+          TAGS="${INPUT_TAGS:-with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,badlinkname,tfogo_checklinkname0}"
+          VERSION=$(go run ./cmd/internal/read_tag || git rev-parse --short HEAD)
+          LDFLAGS_SHARED=$(cat release/LDFLAGS)
+          echo "Building sing-box version=${VERSION} with tags=${TAGS}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -v -trimpath \
+            -tags "${TAGS}" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+            -o sing-box ./cmd/sing-box
+          ./sing-box version
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-linux-amd64
+          path: sing-box
+          retention-days: 14
+
+      - name: Deploy to AWS Lightsail proxy-1 via SSH
+        env:
+          SSH_HOST: ${{ secrets.PROXY1_HOST }}
+          SSH_USER: ${{ secrets.PROXY1_USER }}
+          SSH_KEY: ${{ secrets.PROXY1_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${SSH_KEY}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${SSH_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+
+          scp -i ~/.ssh/id_deploy sing-box "${SSH_USER}@${SSH_HOST}:/tmp/sing-box"
+          ssh -i ~/.ssh/id_deploy "${SSH_USER}@${SSH_HOST}" << 'EOF'
+            set -euo pipefail
+            sudo install -m 755 /tmp/sing-box /usr/local/bin/sing-box
+            rm -f /tmp/sing-box
+            /usr/local/bin/sing-box version
+            if [ ! -f /etc/sing-box/config.json ]; then
+              UUID=$(/usr/local/bin/sing-box generate uuid)
+              HY2_PASS=$(/usr/local/bin/sing-box generate rand --hex 16)
+              SHORT_ID=$(/usr/local/bin/sing-box generate rand --hex 8)
+              KEYPAIR=$(/usr/local/bin/sing-box generate reality-keypair)
+              PRIV_KEY=$(echo "$KEYPAIR" | awk '/PrivateKey:/ {print $2}')
+              PUB_KEY=$(echo "$KEYPAIR" | awk '/PublicKey:/ {print $2}')
+              sudo tee /etc/sing-box/credentials.txt >/dev/null <<CREDS
+UUID=${UUID}
+REALITY_PRIVATE_KEY=${PRIV_KEY}
+REALITY_PUBLIC_KEY=${PUB_KEY}
+REALITY_SHORT_ID=${SHORT_ID}
+REALITY_SNI=www.microsoft.com
+HY2_PASSWORD=${HY2_PASS}
+CREDS
+              sudo chmod 600 /etc/sing-box/credentials.txt
+              sudo tee /etc/sing-box/config.json >/dev/null <<CONFIG
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-reality-in",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [
+        {
+          "uuid": "${UUID}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "www.microsoft.com",
+            "server_port": 443
+          },
+          "private_key": "${PRIV_KEY}",
+          "short_id": [
+            "${SHORT_ID}"
+          ]
+        }
+      }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [
+        {
+          "password": "${HY2_PASS}"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "/etc/sing-box/hy2.crt",
+        "key_path": "/etc/sing-box/hy2.key"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}
+CONFIG
+            fi
+            sudo /usr/local/bin/sing-box check -c /etc/sing-box/config.json
+            sudo systemctl daemon-reload
+            sudo systemctl enable sing-box
+            sudo systemctl restart sing-box
+            sleep 2
+            sudo systemctl status sing-box --no-pager
+          EOF
