@@ -100,6 +100,7 @@
       cursor: pointer;
       transition: all 0.18s;
       display: inline-flex; align-items: center; gap: 5px;
+      text-decoration: none;
     }
     .btn:hover {
       border-color: var(--accent-cyan);
@@ -317,6 +318,9 @@
     </div>
 
     <div class="hud-actions">
+      <button class="btn" id="btn-back-ui" onclick="backToUI()" title="返回 MetaCubeXD 监控台">
+        📊 返回监控台
+      </button>
       <button class="btn active" id="btn-engine" onclick="toggleMapEngine()" title="切换 Google Maps / 内置暗黑地图">
         🗺️ <span id="engine-label">内置暗黑地球</span>
       </button>
@@ -324,7 +328,7 @@
         📍 定位我本地
       </button>
       <button class="btn" onclick="openSettings()">
-        ⚙️ Google Maps Key / 设置
+        ⚙️ 设置
       </button>
     </div>
   </div>
@@ -375,14 +379,14 @@
   <div class="modal">
     <h3>⚙️ 地图与连接设置</h3>
     <div class="form-group">
-      <label>Clash API Secret (若配置了密码请填写)</label>
+      <label>Clash API Secret (已自动从面板同步)</label>
       <input type="password" id="cfg-secret" placeholder="留空表示无密码" />
     </div>
     <div class="form-group">
       <label>Google Maps JavaScript API Key</label>
       <input type="text" id="cfg-gmap-key" placeholder="AIzaSy..." />
       <div class="form-hint">
-        填入后自动切换为 Google Maps 官方暗黑卫星/矢量地图；未填写时默认使用免 Key 的 CartoDB Dark 高清飞线底图。
+        填入后自动切换为 Google Maps 官方暗黑地图；清空则使用免 Key 的 CartoDB Dark 高清飞线底图。
       </div>
     </div>
     <div class="form-group">
@@ -401,10 +405,43 @@
 </div>
 
 <script>
-  // --- Configuration & State ---
-  const urlParams = new URLSearchParams(window.location.search);
-  let apiSecret = urlParams.get('token') || localStorage.getItem('sb_map_secret') || '';
-  let gmapKey = localStorage.getItem('sb_gmap_key') || '';
+  // Auto-detect secret from URL, sb_map_secret, or MetaCubeXD / Yacd localStorage
+  function detectInitialSecret() {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('token')) {
+      localStorage.setItem('sb_map_secret', urlParams.get('token'));
+      return urlParams.get('token');
+    }
+    if (localStorage.getItem('sb_map_secret')) {
+      return localStorage.getItem('sb_map_secret');
+    }
+    try {
+      const epListRaw = localStorage.getItem('endpointList');
+      if (epListRaw) {
+        const epList = JSON.parse(epListRaw);
+        if (Array.isArray(epList) && epList.length > 0 && epList[0].secret) {
+          return epList[0].secret;
+        }
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  function backToUI() {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: 'CLOSE_SINGBOX_MAP' }, '*');
+    } else {
+      window.location.href = '/ui/';
+    }
+  }
+
+  const DEFAULT_GMAP_KEY = 'AIzaSyCNTR1w1APU8qgn9Wk4ctDHpbwssage3wM';
+  let apiSecret = detectInitialSecret();
+  let gmapKey = localStorage.getItem('sb_gmap_key');
+  if (gmapKey === null) {
+    gmapKey = DEFAULT_GMAP_KEY;
+    localStorage.setItem('sb_gmap_key', gmapKey);
+  }
   let homeFallback = {
     lat: parseFloat(localStorage.getItem('sb_home_lat') || '31.2304'),
     lon: parseFloat(localStorage.getItem('sb_home_lon') || '121.4737'),
@@ -458,10 +495,15 @@
     s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&callback=onGoogleMapsReady`;
     s.async = true;
     s.onerror = () => {
-      alert('Google Maps API 加载失败，请检查 API Key 或网络连接，已保持内置暗黑地球模式。');
+      console.warn('Google Maps script failed to load, staying on Leaflet dark map');
     };
     document.head.appendChild(s);
   }
+
+  window.gm_authFailure = function() {
+    console.warn('Google Maps authentication/activation still propagating, falling back to built-in dark map');
+    switchToEngine('leaflet');
+  };
 
   window.onGoogleMapsReady = function() {
     googleMapLoaded = true;
@@ -521,7 +563,7 @@
     }
   }
 
-  // --- Coordinate Projection (Unifies Leaflet & Google Maps onto the 60fps Canvas) ---
+  // --- Coordinate Projection ---
   function latLonToScreen(lat, lon) {
     if (mapEngine === 'google' && googleMap && googleOverlay && googleOverlay.getProjection()) {
       const proj = googleOverlay.getProjection();
@@ -626,7 +668,6 @@
     }
     ctx.stroke();
 
-    // Moving glowing comet particle along quadratic Bezier
     const t = phase % 1;
     const qx = (1 - t) * (1 - t) * p1.x + 2 * (1 - t) * t * ctrlX + t * t * p2.x;
     const qy = (1 - t) * (1 - t) * p1.y + 2 * (1 - t) * t * ctrlY + t * t * p2.y;
@@ -675,7 +716,6 @@
 
     const pinnedEndpoints = new Map();
 
-    // Draw VPS node if known
     if (serverGeo && (serverGeo.lat || serverGeo.lon)) {
       const sPt = latLonToScreen(serverGeo.lat, serverGeo.lon);
       pinnedEndpoints.set(`vps`, {
@@ -690,7 +730,7 @@
     for (let i = 0; i < connections.length; i++) {
       const c = connections[i];
       const isSelected = c.id === selectedConnId;
-      if (selectedConnId && !isSelected) continue; // Focus mode when a connection is clicked
+      if (selectedConnId && !isSelected) continue;
 
       const src = getSourceCoords(c);
       const relay = getRelayCoords(c);
@@ -740,7 +780,6 @@
       }
     }
 
-    // Draw Traceroute hop-by-hop physical backbone path if present
     if (traceHops.length > 0 && serverGeo) {
       let prevPt = latLonToScreen(serverGeo.lat, serverGeo.lon);
       traceHops.forEach((h, idx) => {
@@ -770,6 +809,9 @@
 
   async function fetchMapState() {
     try {
+      if (!apiSecret) {
+        apiSecret = detectInitialSecret();
+      }
       const headers = {};
       if (apiSecret) headers['Authorization'] = `Bearer ${apiSecret}`;
       const res = await fetch('/map/api/state?window=45', { headers });
@@ -1004,6 +1046,8 @@
     closeSettings();
     if (gmapKey) {
       loadGoogleMapsScript(gmapKey);
+    } else {
+      switchToEngine('leaflet');
     }
     fetchMapState();
   }

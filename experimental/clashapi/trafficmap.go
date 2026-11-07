@@ -2,8 +2,10 @@ package clashapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -28,6 +30,153 @@ import (
 
 //go:embed trafficmap_ui.html
 var trafficMapHTML []byte
+
+const uiBridgeJS = `
+window.__METACUBEXD_CONFIG__ = window.__METACUBEXD_CONFIG__ || {
+  defaultBackendURL: '',
+  githubToken: '',
+};
+
+(function() {
+  if (window.__SINGBOX_MAP_BRIDGE_LOADED__) return;
+  window.__SINGBOX_MAP_BRIDGE_LOADED__ = true;
+
+  function getStoredSecret() {
+    try {
+      var epRaw = localStorage.getItem('endpointList');
+      if (epRaw) {
+        var list = JSON.parse(epRaw);
+        if (Array.isArray(list) && list.length > 0 && list[0].secret) {
+          return list[0].secret;
+        }
+      }
+    } catch (e) {}
+    return localStorage.getItem('sb_map_secret') || '';
+  }
+
+  function getMapURL() {
+    var secret = getStoredSecret();
+    return secret ? ('/map?token=' + encodeURIComponent(secret)) : '/map';
+  }
+
+  function toggleMapModal(show) {
+    var modal = document.getElementById('sb-traffic-map-modal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'sb-traffic-map-modal';
+      modal.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#070b14;display:none;flex-direction:column;';
+      var iframe = document.createElement('iframe');
+      iframe.id = 'sb-traffic-map-iframe';
+      iframe.style.cssText = 'width:100%;height:100%;border:none;';
+      modal.appendChild(iframe);
+      document.body.appendChild(modal);
+    }
+    var iframe = document.getElementById('sb-traffic-map-iframe');
+    if (show === undefined) {
+      show = modal.style.display === 'none';
+    }
+    if (show) {
+      iframe.src = getMapURL();
+      modal.style.display = 'flex';
+    } else {
+      modal.style.display = 'none';
+    }
+  }
+
+  window.addEventListener('message', function(ev) {
+    if (ev.data && ev.data.type === 'CLOSE_SINGBOX_MAP') {
+      toggleMapModal(false);
+    }
+  });
+
+  function mountUIEntry() {
+    if (!document.body) return;
+
+    // 1. Floating quick-access button in bottom-right corner of /ui/
+    if (!document.getElementById('sb-map-fab')) {
+      var fab = document.createElement('button');
+      fab.id = 'sb-map-fab';
+      fab.innerHTML = '🌍 全球流量地图';
+      fab.title = '打开 sing-box 全球流量轨迹雷达 (Google Maps)';
+      fab.style.cssText = [
+        'position:fixed',
+        'bottom:22px',
+        'right:22px',
+        'z-index:9999',
+        'display:flex',
+        'align-items:center',
+        'gap:6px',
+        'padding:10px 16px',
+        'border-radius:999px',
+        'border:1px solid rgba(56,189,248,0.45)',
+        'background:linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%)',
+        'color:#f8fafc',
+        'font-size:13px',
+        'font-weight:600',
+        'cursor:pointer',
+        'box-shadow:0 8px 25px rgba(2,132,199,0.45)',
+        'transition:transform 0.18s, box-shadow 0.18s'
+      ].join(';');
+      fab.onmouseenter = function() {
+        fab.style.transform = 'translateY(-2px) scale(1.03)';
+        fab.style.boxShadow = '0 12px 30px rgba(56,189,248,0.65)';
+      };
+      fab.onmouseleave = function() {
+        fab.style.transform = 'none';
+        fab.style.boxShadow = '0 8px 25px rgba(2,132,199,0.45)';
+      };
+      fab.onclick = function() {
+        toggleMapModal(true);
+      };
+      document.body.appendChild(fab);
+    }
+
+    // 2. Also inject directly into MetaCubeXD's sidebar menu (ul.menu) if present
+    var menus = document.querySelectorAll('ul.menu');
+    menus.forEach(function(menu) {
+      if (menu.querySelector('.sb-menu-map-item')) return;
+      var li = document.createElement('li');
+      li.className = 'sb-menu-map-item';
+      var a = document.createElement('a');
+      a.style.cssText = 'display:flex;align-items:center;gap:8px;color:#38bdf8;font-weight:600;cursor:pointer;';
+      a.innerHTML = '<span>🌍</span><span class="is-drawer-close:hidden">全球流量地图</span>';
+      a.onclick = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleMapModal(true);
+      };
+      li.appendChild(a);
+      menu.appendChild(li);
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mountUIEntry);
+  } else {
+    mountUIEntry();
+  }
+  setInterval(mountUIEntry, 1500);
+})();
+`
+
+const unregisterSWJS = `
+self.addEventListener('install', function() {
+  self.skipWaiting();
+});
+self.addEventListener('activate', function(event) {
+  event.waitUntil(
+    caches.keys().then(function(names) {
+      return Promise.all(names.map(function(n) { return caches.delete(n); }));
+    }).then(function() {
+      return self.registration.unregister();
+    }).then(function() {
+      return self.clients.matchAll();
+    }).then(function(clients) {
+      clients.forEach(function(client) { client.navigate(client.url); });
+    })
+  );
+});
+`
 
 type GeoLocation struct {
 	IP          string  `json:"ip"`
@@ -260,13 +409,11 @@ func (m *trafficMapService) geoWorker() {
 			m.geoCache.Store(ipKey, loc)
 		}
 		m.geoInflight.Delete(ipKey)
-		// Gentle rate limit for batch bursts
 		time.Sleep(120 * time.Millisecond)
 	}
 }
 
 func (m *trafficMapService) fetchOnlineGeo(ctx context.Context, ipKey string) *GeoLocation {
-	// Primary: ipwho.is (HTTPS, no strict 45 req/min limit, supports ISP/ASN)
 	reqCtx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
 	defer cancel()
 
@@ -316,7 +463,6 @@ func (m *trafficMapService) fetchOnlineGeo(ctx context.Context, ipKey string) *G
 		}
 	}
 
-	// Fallback: ip-api.com
 	url2 := "http://ip-api.com/json/" + ipKey + "?fields=status,country,countryCode,regionName,city,lat,lon,isp,org,as,query"
 	req2, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url2, nil)
 	if err == nil {
@@ -407,7 +553,6 @@ func (m *trafficMapService) ensureServerGeo() *GeoLocation {
 				}
 			}
 		}
-		// Fallback to ip-api.com
 		req2, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://ip-api.com/json/?fields=status,country,countryCode,city,lat,lon,isp,org,as,query", nil)
 		if err == nil {
 			resp2, err := m.httpClient.Do(req2)
@@ -471,7 +616,6 @@ func (m *trafficMapService) domainWorker() {
 			if job.tracker != nil {
 				job.tracker.RecordResolvedAddr(resolved)
 			}
-			// Pre-warm GeoIP
 			m.getGeoNonBlocking(resolved.String())
 		}
 		m.domInflight.Delete(job.domain)
@@ -587,7 +731,6 @@ func (m *trafficMapService) handleState(w http.ResponseWriter, r *http.Request) 
 		items = append(items, m.buildConnectionItem(tm, true))
 	}
 
-	// Include recently closed connections (newest first, up to 80 items) so fast HTTP visits still appear smoothly
 	recentCount := 0
 	for i := len(closedConns) - 1; i >= 0 && recentCount < 80; i-- {
 		tm := closedConns[i]
@@ -695,7 +838,6 @@ func (m *trafficMapService) runSystemTraceroute(ctx context.Context, targetIP st
 		}
 	}
 
-	// Ensure final target IP is always represented as the last hop if traceroute binary wasn't installed or didn't reach
 	if len(hops) == 0 || hops[len(hops)-1].IP != targetIP {
 		hops = append(hops, TraceHop{
 			Hop: len(hops) + 1,
@@ -709,16 +851,66 @@ func (m *trafficMapService) runSystemTraceroute(ctx context.Context, targetIP st
 func (s *Server) setupTrafficMap(chiRouter chi.Router, secret string) {
 	mapService := newTrafficMapService(s)
 
-	// Public HTML entrypoint (authenticates API calls using token from query/localStorage)
 	chiRouter.Get("/map", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(trafficMapHTML)
+	})
+
+	chiRouter.Get("/map/ui-bridge.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(uiBridgeJS))
 	})
 
 	chiRouter.Group(func(r chi.Router) {
 		r.Use(authentication(secret))
 		r.Get("/map/api/state", mapService.handleState)
 		r.Get("/map/api/trace", mapService.handleTrace)
+	})
+}
+
+// wrapExternalUIHandler injects the Traffic Map navigation button into /ui/ (MetaCubeXD / Yacd)
+func wrapExternalUIHandler(fsDir Dir) http.Handler {
+	fileServer := http.FileServer(fsDir)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleanPath := strings.TrimPrefix(r.URL.Path, "/")
+		if cleanPath == "config.js" {
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(uiBridgeJS))
+			return
+		}
+		if cleanPath == "sw.js" {
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(unregisterSWJS))
+			return
+		}
+		if cleanPath == "" || cleanPath == "index.html" || cleanPath == "200.html" {
+			file, err := fsDir.Open("index.html")
+			if err == nil {
+				defer file.Close()
+				raw, readErr := io.ReadAll(file)
+				if readErr == nil {
+					injected := bytes.Replace(
+						raw,
+						[]byte("</body>"),
+						[]byte(`<script src="/map/ui-bridge.js"></script></body>`),
+						1,
+					)
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(injected)
+					return
+				}
+			}
+		}
+		fileServer.ServeHTTP(w, r)
 	})
 }
