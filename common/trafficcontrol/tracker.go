@@ -3,11 +3,13 @@ package trafficcontrol
 import (
 	"context"
 	"net"
+	"net/netip"
 	"slices"
 	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
@@ -17,16 +19,66 @@ import (
 )
 
 type TrackerMetadata struct {
-	ID           uuid.UUID
-	Metadata     adapter.InboundContext
-	CreatedAt    time.Time
-	ClosedAt     time.Time
-	Upload       *atomic.Int64
-	Download     *atomic.Int64
-	Chain        []string
-	Rule         adapter.Rule
-	Outbound     string
-	OutboundType string
+	ID                  uuid.UUID
+	Metadata            adapter.InboundContext
+	CreatedAt           time.Time
+	ClosedAt            time.Time
+	Upload              *atomic.Int64
+	Download            *atomic.Int64
+	Chain               []string
+	Rule                adapter.Rule
+	Outbound            string
+	OutboundType        string
+	ResolvedDestination *atomic.Pointer[netip.Addr]
+	OutboundDestination *atomic.Pointer[netip.Addr]
+}
+
+func (m *TrackerMetadata) DestinationAddr() netip.Addr {
+	if m.Metadata.Destination.Addr.IsValid() {
+		return m.Metadata.Destination.Addr.Unmap()
+	}
+	if m.ResolvedDestination != nil {
+		if addr := m.ResolvedDestination.Load(); addr != nil && addr.IsValid() {
+			return addr.Unmap()
+		}
+	}
+	if len(m.Metadata.DestinationAddresses) > 0 && m.Metadata.DestinationAddresses[0].IsValid() {
+		return m.Metadata.DestinationAddresses[0].Unmap()
+	}
+	return netip.Addr{}
+}
+
+func (m *TrackerMetadata) OutboundAddr() netip.Addr {
+	if m.OutboundDestination != nil {
+		if addr := m.OutboundDestination.Load(); addr != nil && addr.IsValid() {
+			return addr.Unmap()
+		}
+	}
+	return netip.Addr{}
+}
+
+func (m *TrackerMetadata) RecordRemoteAddr(addr netip.Addr) {
+	if !addr.IsValid() {
+		return
+	}
+	addrCopy := addr.Unmap()
+	if m.OutboundType == C.TypeDirect || m.OutboundType == "" {
+		if m.ResolvedDestination != nil {
+			m.ResolvedDestination.Store(&addrCopy)
+		}
+	} else {
+		if m.OutboundDestination != nil {
+			m.OutboundDestination.Store(&addrCopy)
+		}
+	}
+}
+
+func (m *TrackerMetadata) RecordResolvedAddr(addr netip.Addr) {
+	if !addr.IsValid() || m.ResolvedDestination == nil {
+		return
+	}
+	addrCopy := addr.Unmap()
+	m.ResolvedDestination.Store(&addrCopy)
 }
 
 type Tracker interface {
@@ -70,16 +122,23 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 	chain := common.Map(metadata.OutboundChain, adapter.Outbound.Tag)
 	slices.Reverse(chain)
 	outbound := metadata.OutboundChain[len(metadata.OutboundChain)-1]
+	resolvedDest := new(atomic.Pointer[netip.Addr])
+	if len(metadata.DestinationAddresses) > 0 && metadata.DestinationAddresses[0].IsValid() {
+		addrCopy := metadata.DestinationAddresses[0].Unmap()
+		resolvedDest.Store(&addrCopy)
+	}
 	return TrackerMetadata{
-		ID:           id,
-		Metadata:     metadata,
-		CreatedAt:    time.Now(),
-		Upload:       upload,
-		Download:     download,
-		Chain:        chain,
-		Rule:         matchedRule,
-		Outbound:     outbound.Tag(),
-		OutboundType: outbound.Type(),
+		ID:                  id,
+		Metadata:            metadata,
+		CreatedAt:           time.Now(),
+		Upload:              upload,
+		Download:            download,
+		Chain:               chain,
+		Rule:                matchedRule,
+		Outbound:            outbound.Tag(),
+		OutboundType:        outbound.Type(),
+		ResolvedDestination: resolvedDest,
+		OutboundDestination: new(atomic.Pointer[netip.Addr]),
 	}
 }
 
@@ -91,6 +150,15 @@ type connTracker struct {
 
 func (t *connTracker) Metadata() *TrackerMetadata {
 	return &t.metadata
+}
+
+func (t *connTracker) UpdateDestinationAddress(addr netip.Addr, resolvedAddr netip.Addr) {
+	if resolvedAddr.IsValid() {
+		t.metadata.RecordResolvedAddr(resolvedAddr)
+	}
+	if addr.IsValid() {
+		t.metadata.RecordRemoteAddr(addr)
+	}
 }
 
 func (t *connTracker) Close() error {
@@ -163,6 +231,15 @@ type packetConnTracker struct {
 
 func (t *packetConnTracker) Metadata() *TrackerMetadata {
 	return &t.metadata
+}
+
+func (t *packetConnTracker) UpdateDestinationAddress(addr netip.Addr, resolvedAddr netip.Addr) {
+	if resolvedAddr.IsValid() {
+		t.metadata.RecordResolvedAddr(resolvedAddr)
+	}
+	if addr.IsValid() {
+		t.metadata.RecordRemoteAddr(addr)
+	}
 }
 
 func (t *packetConnTracker) Close() error {

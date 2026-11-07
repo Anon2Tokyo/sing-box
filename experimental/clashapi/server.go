@@ -130,6 +130,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 
 		s.setupMetaAPI(r)
 	})
+	s.setupTrafficMap(chiRouter, options.Secret)
 	if options.ExternalUI != "" {
 		s.externalUI = filemanager.BasePath(ctx, os.ExpandEnv(options.ExternalUI))
 		_, err := filemanager.ReadDir(ctx, s.externalUI)

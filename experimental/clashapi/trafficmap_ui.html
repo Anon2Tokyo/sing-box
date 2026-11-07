@@ -1,0 +1,1022 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sing-box 全球流量轨迹雷达 · Google Maps Traffic Visualizer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --bg-dark: #070b14;
+      --panel-bg: rgba(11, 17, 30, 0.86);
+      --panel-border: rgba(56, 189, 248, 0.22);
+      --text-main: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent-cyan: #00f2fe;
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-pink: #ec4899;
+      --accent-blue: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html {
+      width: 100%; height: 100%; overflow: hidden;
+      background: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    #map-wrapper {
+      position: relative; width: 100vw; height: 100vh;
+    }
+    #leaflet-map, #google-map {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      background: #050811;
+    }
+    #google-map { display: none; }
+    #arc-canvas {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 450;
+    }
+
+    /* Top Header HUD */
+    .hud-header {
+      position: absolute; top: 14px; left: 16px; right: 16px;
+      display: flex; align-items: center; justify-content: space-between;
+      z-index: 1000; pointer-events: none;
+    }
+    .hud-brand, .hud-stats, .hud-actions {
+      pointer-events: auto;
+      background: var(--panel-bg);
+      backdrop-filter: blur(14px);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 10px 16px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    }
+    .hud-brand {
+      display: flex; align-items: center; gap: 12px;
+    }
+    .pulse-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--accent-green);
+      box-shadow: 0 0 12px var(--accent-green);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.35); opacity: 0.65; }
+    }
+    .hud-title {
+      font-size: 15px; font-weight: 700; letter-spacing: 0.4px;
+      background: linear-gradient(90deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .hud-subtitle {
+      font-size: 11px; color: var(--text-muted);
+    }
+    .hud-stats {
+      display: flex; gap: 22px; align-items: center;
+    }
+    .stat-item {
+      display: flex; flex-direction: column; align-items: center;
+    }
+    .stat-val {
+      font-size: 15px; font-weight: 700; color: #f8fafc; font-variant-numeric: tabular-nums;
+    }
+    .stat-lbl {
+      font-size: 11px; color: var(--text-muted);
+    }
+    .hud-actions {
+      display: flex; gap: 8px; align-items: center;
+    }
+    .btn {
+      background: rgba(30, 41, 59, 0.85);
+      color: var(--text-main);
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.18s;
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    .btn:hover {
+      border-color: var(--accent-cyan);
+      color: #fff;
+      background: rgba(56, 189, 248, 0.18);
+    }
+    .btn.active {
+      background: rgba(56, 189, 248, 0.25);
+      border-color: var(--accent-cyan);
+      color: #38bdf8;
+    }
+
+    /* Left Sidebar: Live Connections */
+    .sidebar {
+      position: absolute; top: 82px; left: 16px; bottom: 20px;
+      width: 370px; z-index: 1000;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      display: flex; flex-direction: column;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .sidebar-title-row {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 13px; font-weight: 600;
+    }
+    .search-input {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 8px;
+      padding: 7px 10px;
+      color: #fff; font-size: 12px;
+      outline: none;
+    }
+    .search-input:focus {
+      border-color: var(--accent-cyan);
+    }
+    .conn-list {
+      flex: 1; overflow-y: auto; padding: 8px 10px;
+      display: flex; flex-direction: column; gap: 7px;
+    }
+    .conn-list::-webkit-scrollbar { width: 5px; }
+    .conn-list::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.25); border-radius: 4px; }
+    .conn-card {
+      background: rgba(15, 23, 42, 0.68);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 10px;
+      padding: 9px 11px;
+      cursor: pointer;
+      transition: all 0.16s;
+    }
+    .conn-card:hover, .conn-card.selected {
+      border-color: var(--accent-cyan);
+      background: rgba(30, 58, 138, 0.32);
+    }
+    .conn-top {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 5px; gap: 6px;
+    }
+    .conn-host {
+      font-size: 13px; font-weight: 600; color: #f1f5f9;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .badge {
+      font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;
+      flex-shrink: 0;
+    }
+    .badge-active { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge-recent { background: rgba(148, 163, 184, 0.16); color: #94a3b8; }
+    .conn-route {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 11px; color: #cbd5e1;
+      margin-bottom: 4px; flex-wrap: wrap;
+    }
+    .route-arrow { color: #38bdf8; font-weight: bold; }
+    .conn-meta {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 11px; color: var(--text-muted);
+    }
+
+    /* Right Panel: Selected Connection Detail & Traceroute */
+    .detail-panel {
+      position: absolute; top: 82px; right: 16px;
+      width: 360px; max-height: calc(100vh - 102px);
+      z-index: 1000;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      padding: 14px;
+      display: none; flex-direction: column; gap: 10px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+      overflow-y: auto;
+    }
+    .detail-panel.open { display: flex; }
+    .detail-header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+      padding-bottom: 8px;
+    }
+    .hop-box {
+      background: rgba(15, 23, 42, 0.72);
+      border-left: 3px solid var(--accent-cyan);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    .hop-box.origin { border-left-color: var(--accent-green); }
+    .hop-box.relay { border-left-color: var(--accent-blue); }
+    .hop-box.dest { border-left-color: var(--accent-amber); }
+    .hop-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 2px; }
+    .hop-main { font-weight: 600; color: #f8fafc; }
+    .hop-sub { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+
+    .trace-list {
+      display: flex; flex-direction: column; gap: 5px;
+      max-height: 240px; overflow-y: auto;
+      margin-top: 4px;
+    }
+    .trace-item {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; padding: 5px 8px;
+      background: rgba(15, 23, 42, 0.55);
+      border-radius: 6px;
+    }
+    .trace-num {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: rgba(236, 72, 153, 0.2); color: #f472b6;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; flex-shrink: 0;
+    }
+
+    /* Legend Bottom Right */
+    .map-legend {
+      position: absolute; bottom: 20px; right: 16px;
+      z-index: 999;
+      background: var(--panel-bg);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 8px 14px;
+      display: flex; gap: 14px; align-items: center;
+      font-size: 11px; color: var(--text-muted);
+    }
+    .legend-dot {
+      width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 5px;
+    }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+      z-index: 2000; display: none; align-items: center; justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: #0f172a;
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      width: 440px; max-width: 92vw;
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+    }
+    .modal h3 { margin-bottom: 12px; font-size: 16px; }
+    .form-group { margin-bottom: 12px; }
+    .form-group label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px; }
+    .form-group input {
+      width: 100%; padding: 8px 10px; border-radius: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      background: #070b14; color: #fff; font-size: 13px;
+    }
+    .form-hint { font-size: 11px; color: #64748b; margin-top: 4px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+<div id="map-wrapper">
+  <div id="leaflet-map"></div>
+  <div id="google-map"></div>
+  <canvas id="arc-canvas"></canvas>
+
+  <!-- Top Header -->
+  <div class="hud-header">
+    <div class="hud-brand">
+      <div class="pulse-dot" id="status-dot"></div>
+      <div>
+        <div class="hud-title">sing-box 全球流量轨迹雷达</div>
+        <div class="hud-subtitle" id="vps-banner">正在定位 VPS 节点与实时连接...</div>
+      </div>
+    </div>
+
+    <div class="hud-stats">
+      <div class="stat-item">
+        <span class="stat-val" id="stat-active">0</span>
+        <span class="stat-lbl">活动连接</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-val" id="stat-countries">0</span>
+        <span class="stat-lbl">目标国家/地区</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-val" id="stat-down">0 B</span>
+        <span class="stat-lbl">累计下载</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-val" id="stat-up">0 B</span>
+        <span class="stat-lbl">累计上传</span>
+      </div>
+    </div>
+
+    <div class="hud-actions">
+      <button class="btn active" id="btn-engine" onclick="toggleMapEngine()" title="切换 Google Maps / 内置暗黑地图">
+        🗺️ <span id="engine-label">内置暗黑地球</span>
+      </button>
+      <button class="btn" onclick="locateMyBrowser()" title="用浏览器定位补充本地起点坐标">
+        📍 定位我本地
+      </button>
+      <button class="btn" onclick="openSettings()">
+        ⚙️ Google Maps Key / 设置
+      </button>
+    </div>
+  </div>
+
+  <!-- Left Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-title-row">
+        <span>实时访问轨迹 (本地 ➔ VPS ➔ 最终目标)</span>
+        <span id="conn-count-badge" style="color:#38bdf8;font-size:12px;">0 条</span>
+      </div>
+      <input type="text" class="search-input" id="filter-input" placeholder="搜索域名 (如 google.com)、IP、国家、机房..." oninput="renderSidebar()" />
+    </div>
+    <div class="conn-list" id="conn-list"></div>
+  </div>
+
+  <!-- Right Detail & Traceroute Panel -->
+  <div class="detail-panel" id="detail-panel">
+    <div class="detail-header">
+      <strong id="detail-title" style="font-size:14px;color:#38bdf8;">连接详情</strong>
+      <button class="btn" style="padding:2px 8px;" onclick="closeDetail()">✕</button>
+    </div>
+    <div id="detail-body" style="display:flex;flex-direction:column;gap:8px;"></div>
+    <div style="display:flex;gap:8px;margin-top:4px;">
+      <button class="btn active" style="flex:1;justify-content:center;" id="btn-trace" onclick="runTraceroute()">
+        🔍 追踪全线路由跳点 (Traceroute)
+      </button>
+    </div>
+    <div id="trace-container" style="display:none;">
+      <div style="font-size:11px;color:#f472b6;font-weight:600;margin-bottom:4px;">
+        ⚡ 物理骨干网逐跳路径 (VPS ➔ 最终服务器)：
+      </div>
+      <div class="trace-list" id="trace-list"></div>
+    </div>
+  </div>
+
+  <!-- Legend -->
+  <div class="map-legend">
+    <span><i class="legend-dot" style="background:#10b981;box-shadow:0 0 8px #10b981;"></i>本地起点 (Client)</span>
+    <span><i class="legend-dot" style="background:#3b82f6;box-shadow:0 0 8px #3b82f6;"></i>你的 VPS 节点</span>
+    <span><i class="legend-dot" style="background:#f59e0b;box-shadow:0 0 8px #f59e0b;"></i>网站最终服务器</span>
+    <span><i class="legend-dot" style="background:#ec4899;box-shadow:0 0 8px #ec4899;"></i>Traceroute 骨干跳点</span>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-backdrop" id="settings-modal">
+  <div class="modal">
+    <h3>⚙️ 地图与连接设置</h3>
+    <div class="form-group">
+      <label>Clash API Secret (若配置了密码请填写)</label>
+      <input type="password" id="cfg-secret" placeholder="留空表示无密码" />
+    </div>
+    <div class="form-group">
+      <label>Google Maps JavaScript API Key</label>
+      <input type="text" id="cfg-gmap-key" placeholder="AIzaSy..." />
+      <div class="form-hint">
+        填入后自动切换为 Google Maps 官方暗黑卫星/矢量地图；未填写时默认使用免 Key 的 CartoDB Dark 高清飞线底图。
+      </div>
+    </div>
+    <div class="form-group">
+      <label>默认本地起点坐标 (当客户端显示为内网 IP 时兜底使用)</label>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="cfg-home-lat" placeholder="纬度 (如 31.2304)" />
+        <input type="text" id="cfg-home-lon" placeholder="经度 (如 121.4737)" />
+        <input type="text" id="cfg-home-city" placeholder="城市名 (如 上海)" />
+      </div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+      <button class="btn" onclick="closeSettings()">取消</button>
+      <button class="btn active" onclick="saveSettings()">保存并应用</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- Configuration & State ---
+  const urlParams = new URLSearchParams(window.location.search);
+  let apiSecret = urlParams.get('token') || localStorage.getItem('sb_map_secret') || '';
+  let gmapKey = localStorage.getItem('sb_gmap_key') || '';
+  let homeFallback = {
+    lat: parseFloat(localStorage.getItem('sb_home_lat') || '31.2304'),
+    lon: parseFloat(localStorage.getItem('sb_home_lon') || '121.4737'),
+    city: localStorage.getItem('sb_home_city') || '本地客户端'
+  };
+
+  let mapEngine = 'leaflet'; // 'leaflet' | 'google'
+  let leafletMap = null;
+  let googleMap = null;
+  let googleOverlay = null;
+  let googleMapLoaded = false;
+
+  let serverGeo = null;
+  let connections = [];
+  let selectedConnId = null;
+  let traceHops = [];
+  let animPhase = 0;
+
+  // --- Initialize Leaflet Dark Map & Canvas Overlay ---
+  function initLeaflet() {
+    leafletMap = L.map('leaflet-map', {
+      center: [25, 115],
+      zoom: 3,
+      minZoom: 2,
+      maxZoom: 18,
+      zoomControl: false,
+      worldCopyJump: true,
+      attributionControl: false
+    });
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      subdomains: 'abcd',
+      maxZoom: 19
+    }).addTo(leafletMap);
+
+    leafletMap.on('move zoom viewreset resize', () => {
+      resizeCanvas();
+    });
+  }
+
+  // --- Initialize Google Maps ---
+  function loadGoogleMapsScript(key) {
+    if (!key) return;
+    if (window.google && window.google.maps) {
+      initGoogleMapInstance();
+      return;
+    }
+    const existing = document.getElementById('gmap-script');
+    if (existing) existing.remove();
+    const s = document.createElement('script');
+    s.id = 'gmap-script';
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&callback=onGoogleMapsReady`;
+    s.async = true;
+    s.onerror = () => {
+      alert('Google Maps API 加载失败，请检查 API Key 或网络连接，已保持内置暗黑地球模式。');
+    };
+    document.head.appendChild(s);
+  }
+
+  window.onGoogleMapsReady = function() {
+    googleMapLoaded = true;
+    initGoogleMapInstance();
+    switchToEngine('google');
+  };
+
+  function initGoogleMapInstance() {
+    if (googleMap) return;
+    const darkStyle = [
+      { elementType: "geometry", stylers: [{ color: "#09101d" }] },
+      { elementType: "labels.text.stroke", stylers: [{ color: "#09101d" }] },
+      { elementType: "labels.text.fill", stylers: [{ color: "#64748b" }] },
+      { featureType: "administrative.country", elementType: "geometry.stroke", stylers: [{ color: "#1e293b" }] },
+      { featureType: "water", elementType: "geometry", stylers: [{ color: "#04070f" }] },
+      { featureType: "road", stylers: [{ visibility: "simplified" }, { color: "#1e293b" }] }
+    ];
+    googleMap = new google.maps.Map(document.getElementById('google-map'), {
+      center: { lat: 25, lng: 115 },
+      zoom: 3,
+      minZoom: 2,
+      styles: darkStyle,
+      disableDefaultUI: true,
+      zoomControl: false,
+      backgroundColor: '#04070f'
+    });
+
+    class ProjectionHelper extends google.maps.OverlayView {
+      onAdd() {}
+      draw() {}
+      onRemove() {}
+    }
+    googleOverlay = new ProjectionHelper();
+    googleOverlay.setMap(googleMap);
+  }
+
+  function switchToEngine(engine) {
+    if (engine === 'google' && !googleMapLoaded) {
+      if (!gmapKey) {
+        openSettings();
+        return;
+      }
+      loadGoogleMapsScript(gmapKey);
+      return;
+    }
+    mapEngine = engine;
+    document.getElementById('leaflet-map').style.display = engine === 'leaflet' ? 'block' : 'none';
+    document.getElementById('google-map').style.display = engine === 'google' ? 'block' : 'none';
+    document.getElementById('engine-label').textContent = engine === 'google' ? 'Google Maps 官方引擎' : '内置暗黑地球';
+  }
+
+  function toggleMapEngine() {
+    if (mapEngine === 'leaflet') {
+      switchToEngine('google');
+    } else {
+      switchToEngine('leaflet');
+    }
+  }
+
+  // --- Coordinate Projection (Unifies Leaflet & Google Maps onto the 60fps Canvas) ---
+  function latLonToScreen(lat, lon) {
+    if (mapEngine === 'google' && googleMap && googleOverlay && googleOverlay.getProjection()) {
+      const proj = googleOverlay.getProjection();
+      const pt = proj.fromLatLngToContainerPixel(new google.maps.LatLng(lat, lon));
+      if (pt) return { x: pt.x, y: pt.y };
+    }
+    if (leafletMap) {
+      const pt = leafletMap.latLngToContainerPoint([lat, lon]);
+      return { x: pt.x, y: pt.y };
+    }
+    return { x: 0, y: 0 };
+  }
+
+  function panMapTo(lat, lon) {
+    if (mapEngine === 'google' && googleMap) {
+      googleMap.panTo({ lat, lng: lon });
+    } else if (leafletMap) {
+      leafletMap.panTo([lat, lon], { animate: true });
+    }
+  }
+
+  // --- Canvas Geodesic Flight Arcs & Animated Particles ---
+  const canvas = document.getElementById('arc-canvas');
+  const ctx = canvas.getContext('2d');
+
+  function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resizeCanvas);
+
+  function getSourceCoords(c) {
+    if (c.sourceGeo && !c.sourceGeo.isPrivate && !c.sourceGeo.pending && (c.sourceGeo.lat || c.sourceGeo.lon)) {
+      return {
+        lat: c.sourceGeo.lat,
+        lon: c.sourceGeo.lon,
+        label: `${c.sourceGeo.city || c.sourceGeo.country || c.sourceIP}`
+      };
+    }
+    return {
+      lat: homeFallback.lat,
+      lon: homeFallback.lon,
+      label: homeFallback.city
+    };
+  }
+
+  function getRelayCoords(c) {
+    if (c.outboundGeo && !c.outboundGeo.isPrivate && !c.outboundGeo.pending && (c.outboundGeo.lat || c.outboundGeo.lon)) {
+      return {
+        lat: c.outboundGeo.lat,
+        lon: c.outboundGeo.lon,
+        label: `${c.outboundTag} (${c.outboundGeo.city || c.outboundGeo.country})`
+      };
+    }
+    if (serverGeo && (serverGeo.lat || serverGeo.lon)) {
+      return {
+        lat: serverGeo.lat,
+        lon: serverGeo.lon,
+        label: `VPS (${serverGeo.city || serverGeo.country})`
+      };
+    }
+    return null;
+  }
+
+  function getDestCoords(c) {
+    if (c.destGeo && !c.destGeo.isPrivate && !c.destGeo.pending && (c.destGeo.lat || c.destGeo.lon)) {
+      return {
+        lat: c.destGeo.lat,
+        lon: c.destGeo.lon,
+        label: `${c.destGeo.city || c.destGeo.country || c.destIP}`
+      };
+    }
+    return null;
+  }
+
+  function drawCurvedArc(p1, p2, color, width, alpha, isSelected, phase) {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 2) return;
+
+    const midX = (p1.x + p2.x) / 2;
+    const midY = (p1.y + p2.y) / 2;
+    const curvature = Math.min(dist * 0.24, 140);
+    const nx = -dy / dist;
+    const ny = dx / dist;
+    const ctrlX = midX + nx * curvature * (dx >= 0 ? -1 : 1);
+    const ctrlY = midY + ny * curvature * (dx >= 0 ? -1 : 1);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.quadraticCurveTo(ctrlX, ctrlY, p2.x, p2.y);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = width;
+    if (isSelected) {
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 12;
+    }
+    ctx.stroke();
+
+    // Moving glowing comet particle along quadratic Bezier
+    const t = phase % 1;
+    const qx = (1 - t) * (1 - t) * p1.x + 2 * (1 - t) * t * ctrlX + t * t * p2.x;
+    const qy = (1 - t) * (1 - t) * p1.y + 2 * (1 - t) * t * ctrlY + t * t * p2.y;
+
+    ctx.globalAlpha = Math.min(1, alpha + 0.35);
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(qx, qy, isSelected ? 4 : 2.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawNodePin(pt, color, radius, label, showLabel) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, radius + 4, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.22;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.95;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 10;
+    ctx.fill();
+
+    if (showLabel && label) {
+      ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+      const textWidth = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(7, 11, 20, 0.82)';
+      ctx.fillRect(pt.x + 8, pt.y - 9, textWidth + 10, 18);
+      ctx.fillStyle = '#f8fafc';
+      ctx.shadowBlur = 0;
+      ctx.fillText(label, pt.x + 13, pt.y + 4);
+    }
+    ctx.restore();
+  }
+
+  function animateLoop() {
+    animPhase += 0.0085;
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+    const pinnedEndpoints = new Map();
+
+    // Draw VPS node if known
+    if (serverGeo && (serverGeo.lat || serverGeo.lon)) {
+      const sPt = latLonToScreen(serverGeo.lat, serverGeo.lon);
+      pinnedEndpoints.set(`vps`, {
+        pt: sPt,
+        color: '#3b82f6',
+        radius: 6,
+        label: `VPS: ${serverGeo.city || serverGeo.country} (${serverGeo.ip})`,
+        showLabel: true
+      });
+    }
+
+    for (let i = 0; i < connections.length; i++) {
+      const c = connections[i];
+      const isSelected = c.id === selectedConnId;
+      if (selectedConnId && !isSelected) continue; // Focus mode when a connection is clicked
+
+      const src = getSourceCoords(c);
+      const relay = getRelayCoords(c);
+      const dst = getDestCoords(c);
+
+      const pSrc = src ? latLonToScreen(src.lat, src.lon) : null;
+      const pRelay = relay ? latLonToScreen(relay.lat, relay.lon) : null;
+      const pDst = dst ? latLonToScreen(dst.lat, dst.lon) : null;
+
+      const baseAlpha = isSelected ? 0.95 : (c.active ? 0.55 : 0.22);
+      const lineWidth = isSelected ? 2.8 : (c.active ? 1.6 : 1.0);
+      const offsetPhase = (animPhase + i * 0.07) % 1;
+
+      if (pSrc) {
+        pinnedEndpoints.set(`src_${src.lat}_${src.lon}`, {
+          pt: pSrc,
+          color: '#10b981',
+          radius: 5,
+          label: `起点: ${src.label}`,
+          showLabel: true
+        });
+      }
+
+      if (pSrc && pRelay) {
+        drawCurvedArc(pSrc, pRelay, '#10b981', lineWidth, baseAlpha, isSelected, offsetPhase);
+      }
+
+      if (pRelay && pDst) {
+        drawCurvedArc(pRelay, pDst, '#00f2fe', lineWidth, baseAlpha, isSelected, (offsetPhase + 0.3) % 1);
+      } else if (pSrc && pDst) {
+        drawCurvedArc(pSrc, pDst, '#00f2fe', lineWidth, baseAlpha, isSelected, offsetPhase);
+      }
+
+      if (pDst) {
+        const key = `dst_${dst.lat.toFixed(2)}_${dst.lon.toFixed(2)}`;
+        if (!pinnedEndpoints.has(key) || isSelected) {
+          pinnedEndpoints.set(key, {
+            pt: pDst,
+            color: '#f59e0b',
+            radius: isSelected ? 6 : 4,
+            label: isSelected
+              ? `${c.host || c.destIP} · ${dst.label}`
+              : `${dst.label}`,
+            showLabel: isSelected || pinnedEndpoints.size < 18
+          });
+        }
+      }
+    }
+
+    // Draw Traceroute hop-by-hop physical backbone path if present
+    if (traceHops.length > 0 && serverGeo) {
+      let prevPt = latLonToScreen(serverGeo.lat, serverGeo.lon);
+      traceHops.forEach((h, idx) => {
+        if (h.geo && (h.geo.lat || h.geo.lon) && !h.geo.isPrivate) {
+          const curPt = latLonToScreen(h.geo.lat, h.geo.lon);
+          drawCurvedArc(prevPt, curPt, '#ec4899', 2.6, 0.95, true, (animPhase * 1.4 + idx * 0.12) % 1);
+          drawNodePin(curPt, '#ec4899', 4.5, `#${h.hop} ${h.geo.city || h.geo.country} (${h.rtt || h.ip})`, true);
+          prevPt = curPt;
+        }
+      });
+    }
+
+    pinnedEndpoints.forEach(node => {
+      drawNodePin(node.pt, node.color, node.radius, node.label, node.showLabel);
+    });
+
+    requestAnimationFrame(animateLoop);
+  }
+
+  // --- Data Fetching & UI Rendering ---
+  function formatBytes(bytes) {
+    if (!bytes || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return (bytes / Math.pow(1024, i)).toFixed(i > 1 ? 2 : 0) + ' ' + units[i];
+  }
+
+  async function fetchMapState() {
+    try {
+      const headers = {};
+      if (apiSecret) headers['Authorization'] = `Bearer ${apiSecret}`;
+      const res = await fetch('/map/api/state?window=45', { headers });
+      if (res.status === 401) {
+        document.getElementById('vps-banner').textContent = '⚠️ 需要 Clash API Secret 鉴权，请在右上角设置中填写';
+        return;
+      }
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.server) {
+        serverGeo = data.server;
+        document.getElementById('vps-banner').textContent =
+          `VPS 节点: ${serverGeo.country || ''} ${serverGeo.city || ''} (${serverGeo.ip}) · ${serverGeo.isp || serverGeo.org || ''}`;
+      }
+      connections = data.connections || [];
+
+      const activeCount = connections.filter(c => c.active).length;
+      const countrySet = new Set();
+      connections.forEach(c => {
+        if (c.destGeo && c.destGeo.countryCode) countrySet.add(c.destGeo.countryCode);
+      });
+
+      document.getElementById('stat-active').textContent = activeCount;
+      document.getElementById('stat-countries').textContent = countrySet.size;
+      document.getElementById('stat-down').textContent = formatBytes(data.downloadTotal);
+      document.getElementById('stat-up').textContent = formatBytes(data.uploadTotal);
+
+      renderSidebar();
+      if (selectedConnId) {
+        const found = connections.find(c => c.id === selectedConnId);
+        if (found) renderDetailPanel(found);
+      }
+    } catch (e) {
+      console.warn('fetchMapState error:', e);
+    }
+  }
+
+  function renderSidebar() {
+    const q = (document.getElementById('filter-input').value || '').trim().toLowerCase();
+    const listEl = document.getElementById('conn-list');
+    const filtered = connections.filter(c => {
+      if (!q) return true;
+      const hay = [
+        c.host, c.destIP, c.sourceIP, c.outboundTag,
+        c.destGeo?.country, c.destGeo?.city, c.destGeo?.isp, c.destGeo?.org
+      ].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+
+    document.getElementById('conn-count-badge').textContent = `${filtered.length} 条`;
+
+    listEl.innerHTML = filtered.slice(0, 80).map(c => {
+      const srcName = (c.sourceGeo && !c.sourceGeo.isPrivate && (c.sourceGeo.city || c.sourceGeo.country))
+        ? (c.sourceGeo.city || c.sourceGeo.country)
+        : homeFallback.city;
+      const relayName = serverGeo ? (serverGeo.city || serverGeo.country || 'VPS') : c.outboundTag;
+      const dstName = c.destGeo
+        ? (c.destGeo.pending ? '定位中...' : `${c.destGeo.country || ''} ${c.destGeo.city || ''}`.trim() || c.destIP)
+        : (c.destIP || '解析中');
+      const isSel = c.id === selectedConnId ? 'selected' : '';
+      return `
+        <div class="conn-card ${isSel}" onclick="selectConnection('${c.id}')">
+          <div class="conn-top">
+            <div class="conn-host" title="${c.host || c.destIP}">${c.host || c.destIP || '未知目标'}</div>
+            <span class="badge ${c.active ? 'badge-active' : 'badge-recent'}">${c.active ? 'LIVE' : '刚结束'}</span>
+          </div>
+          <div class="conn-route">
+            <span>🟢 ${srcName}</span>
+            <span class="route-arrow">➔</span>
+            <span>🔵 ${relayName}</span>
+            <span class="route-arrow">➔</span>
+            <span>🟠 ${dstName}</span>
+          </div>
+          <div class="conn-meta">
+            <span>最终IP: ${c.destIP || '...'} ${c.destGeo?.org ? `· ${c.destGeo.org.slice(0, 18)}` : ''}</span>
+            <span>↓${formatBytes(c.download)} ↑${formatBytes(c.upload)}</span>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function selectConnection(id) {
+    if (selectedConnId === id) {
+      closeDetail();
+      return;
+    }
+    selectedConnId = id;
+    traceHops = [];
+    document.getElementById('trace-container').style.display = 'none';
+    const conn = connections.find(c => c.id === id);
+    if (conn) {
+      renderDetailPanel(conn);
+      document.getElementById('detail-panel').classList.add('open');
+      const dst = getDestCoords(conn);
+      if (dst) panMapTo(dst.lat, dst.lon);
+    }
+    renderSidebar();
+  }
+
+  function closeDetail() {
+    selectedConnId = null;
+    traceHops = [];
+    document.getElementById('detail-panel').classList.remove('open');
+    renderSidebar();
+  }
+
+  function renderDetailPanel(c) {
+    document.getElementById('detail-title').textContent = c.host || c.destIP || '连接详情';
+    const src = getSourceCoords(c);
+    const dstGeo = c.destGeo || {};
+    document.getElementById('detail-body').innerHTML = `
+      <div class="hop-box origin">
+        <div class="hop-label">1. 起点 · 你的本地位置 (Client)</div>
+        <div class="hop-main">${src.label} (${c.sourceIP || '本地'})</div>
+        <div class="hop-sub">入站协议: ${c.inbound} · 网络: ${c.network.toUpperCase()}</div>
+      </div>
+      <div class="hop-box relay">
+        <div class="hop-label">2. 中转 · 你的 VPS 代理节点</div>
+        <div class="hop-main">${serverGeo ? `${serverGeo.country} ${serverGeo.city} (${serverGeo.ip})` : 'VPS 节点'}</div>
+        <div class="hop-sub">出站策略: ${(c.chains || []).join(' ➔ ') || c.outboundTag} (${c.outboundType})</div>
+      </div>
+      <div class="hop-box dest">
+        <div class="hop-label">3. 终点 · 网站最终落地服务器</div>
+        <div class="hop-main">${c.host ? `${c.host} ` : ''}[${c.destIP || '解析中'}:${c.destPort}]</div>
+        <div class="hop-sub">
+          位置: ${dstGeo.country || '未知'} ${dstGeo.city || ''} (${dstGeo.lat ? `${dstGeo.lat.toFixed(2)}, ${dstGeo.lon.toFixed(2)}` : ''})<br/>
+          机房/ISP: ${dstGeo.isp || dstGeo.org || '未知'} ${dstGeo.as || ''}
+        </div>
+      </div>
+    `;
+  }
+
+  async function runTraceroute() {
+    const conn = connections.find(c => c.id === selectedConnId);
+    if (!conn || !conn.destIP) return;
+    const btn = document.getElementById('btn-trace');
+    btn.textContent = '⏳ 正在从 VPS 探测骨干网路由跳点...';
+    btn.disabled = true;
+    try {
+      const headers = {};
+      if (apiSecret) headers['Authorization'] = `Bearer ${apiSecret}`;
+      const res = await fetch(`/map/api/trace?ip=${encodeURIComponent(conn.destIP)}`, { headers });
+      const data = await res.json();
+      traceHops = data.hops || [];
+      const container = document.getElementById('trace-container');
+      const list = document.getElementById('trace-list');
+      container.style.display = 'block';
+      list.innerHTML = traceHops.map(h => {
+        if (h.timeout) {
+          return `<div class="trace-item"><div class="trace-num">${h.hop}</div><div style="color:#64748b;">* 请求超时 (核心路由隐藏 ICMP)</div></div>`;
+        }
+        const loc = h.geo ? `${h.geo.country || ''} ${h.geo.city || ''}`.trim() : '';
+        const org = h.geo?.isp || h.geo?.org || '';
+        return `
+          <div class="trace-item">
+            <div class="trace-num">${h.hop}</div>
+            <div style="flex:1;">
+              <div style="color:#f8fafc;font-weight:600;">${h.ip} <span style="color:#34d399;margin-left:6px;">${h.rtt || ''}</span></div>
+              <div style="color:#94a3b8;">${loc || '路由节点'} ${org ? `· ${org}` : ''}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    } catch (e) {
+      alert('Traceroute 执行失败: ' + e.message);
+    } finally {
+      btn.textContent = '🔍 追踪全线路由跳点 (Traceroute)';
+      btn.disabled = false;
+    }
+  }
+
+  // --- Browser Geolocation Helper ---
+  async function locateMyBrowser() {
+    try {
+      const res = await fetch('https://ipwho.is/');
+      const data = await res.json();
+      if (data && data.success && data.latitude) {
+        homeFallback = {
+          lat: data.latitude,
+          lon: data.longitude,
+          city: `${data.city || data.country} (本机)`
+        };
+        localStorage.setItem('sb_home_lat', String(homeFallback.lat));
+        localStorage.setItem('sb_home_lon', String(homeFallback.lon));
+        localStorage.setItem('sb_home_city', homeFallback.city);
+        panMapTo(homeFallback.lat, homeFallback.lon);
+        return;
+      }
+    } catch (_) {}
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(pos => {
+        homeFallback.lat = pos.coords.latitude;
+        homeFallback.lon = pos.coords.longitude;
+        homeFallback.city = '我的当前位置';
+        localStorage.setItem('sb_home_lat', String(homeFallback.lat));
+        localStorage.setItem('sb_home_lon', String(homeFallback.lon));
+        localStorage.setItem('sb_home_city', homeFallback.city);
+        panMapTo(homeFallback.lat, homeFallback.lon);
+      });
+    }
+  }
+
+  // --- Settings Modal ---
+  function openSettings() {
+    document.getElementById('cfg-secret').value = apiSecret;
+    document.getElementById('cfg-gmap-key').value = gmapKey;
+    document.getElementById('cfg-home-lat').value = homeFallback.lat;
+    document.getElementById('cfg-home-lon').value = homeFallback.lon;
+    document.getElementById('cfg-home-city').value = homeFallback.city;
+    document.getElementById('settings-modal').classList.add('open');
+  }
+
+  function closeSettings() {
+    document.getElementById('settings-modal').classList.remove('open');
+  }
+
+  function saveSettings() {
+    apiSecret = document.getElementById('cfg-secret').value.trim();
+    gmapKey = document.getElementById('cfg-gmap-key').value.trim();
+    const lat = parseFloat(document.getElementById('cfg-home-lat').value);
+    const lon = parseFloat(document.getElementById('cfg-home-lon').value);
+    const city = document.getElementById('cfg-home-city').value.trim();
+    if (!isNaN(lat) && !isNaN(lon)) {
+      homeFallback = { lat, lon, city: city || '本地客户端' };
+      localStorage.setItem('sb_home_lat', String(lat));
+      localStorage.setItem('sb_home_lon', String(lon));
+      localStorage.setItem('sb_home_city', homeFallback.city);
+    }
+    localStorage.setItem('sb_map_secret', apiSecret);
+    localStorage.setItem('sb_gmap_key', gmapKey);
+    closeSettings();
+    if (gmapKey) {
+      loadGoogleMapsScript(gmapKey);
+    }
+    fetchMapState();
+  }
+
+  // --- Boot ---
+  resizeCanvas();
+  initLeaflet();
+  if (gmapKey) {
+    loadGoogleMapsScript(gmapKey);
+  }
+  fetchMapState();
+  setInterval(fetchMapState, 1500);
+  requestAnimationFrame(animateLoop);
+</script>
+</body>
+</html>

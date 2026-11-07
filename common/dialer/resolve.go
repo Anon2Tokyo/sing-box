@@ -104,6 +104,9 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 	if err != nil {
 		return nil, err
 	}
+	if metadata := adapter.ContextFrom(ctx); metadata != nil && len(metadata.DestinationAddresses) == 0 {
+		metadata.DestinationAddresses = addresses
+	}
 	if d.parallel {
 		return N.DialParallel(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
 	} else {
@@ -123,6 +126,9 @@ func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksadd
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
 	if err != nil {
 		return nil, err
+	}
+	if metadata := adapter.ContextFrom(ctx); metadata != nil && len(metadata.DestinationAddresses) == 0 {
+		metadata.DestinationAddresses = addresses
 	}
 	conn, destinationAddress, err := N.ListenSerial(ctx, d.dialer, destination, addresses)
 	if err != nil {
@@ -152,6 +158,9 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
+	if metadata := adapter.ContextFrom(ctx); metadata != nil && len(metadata.DestinationAddresses) == 0 {
+		metadata.DestinationAddresses = addresses
+	}
 	if fallbackDelay == 0 {
 		fallbackDelay = d.fallbackDelay
 	}
@@ -174,6 +183,9 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
 	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
 	if err != nil {
 		return nil, err
+	}
+	if metadata := adapter.ContextFrom(ctx); metadata != nil && len(metadata.DestinationAddresses) == 0 {
+		metadata.DestinationAddresses = addresses
 	}
 	if fallbackDelay == 0 {
 		fallbackDelay = d.fallbackDelay

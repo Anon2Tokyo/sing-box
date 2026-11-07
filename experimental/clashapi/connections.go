@@ -82,13 +82,22 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 	} else {
 		rule = "final"
 	}
+	tm := (*trafficcontrol.TrackerMetadata)(&c)
+	destinationAddr := tm.DestinationAddr()
+	outboundAddr := tm.OutboundAddr()
+	var outboundIP string
+	if outboundAddr.IsValid() {
+		outboundIP = outboundAddr.String()
+	}
 	return json.Marshal(map[string]any{
 		"id": c.ID,
 		"metadata": map[string]any{
 			"network":         c.Metadata.Network,
 			"type":            inbound,
 			"sourceIP":        c.Metadata.Source.Addr,
-			"destinationIP":   c.Metadata.Destination.Addr,
+			"destinationIP":   destinationAddr,
+			"outboundIP":      outboundIP,
+			"outboundType":    c.OutboundType,
 			"sourcePort":      F.ToString(c.Metadata.Source.Port),
 			"destinationPort": F.ToString(c.Metadata.Destination.Port),
 			"host":            domain,

@@ -35,6 +35,10 @@ import (
 
 var _ adapter.ConnectionManager = (*ConnectionManager)(nil)
 
+type destinationAddressUpdater interface {
+	UpdateDestinationAddress(addr netip.Addr, resolvedAddr netip.Addr)
+}
+
 type ConnectionManager struct {
 	logger         logger.ContextLogger
 	urlTestHistory *urltest.HistoryStorage
@@ -132,6 +136,14 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		m.logger.ErrorContext(ctx, err)
 		return
+	}
+	if updater, loaded := common.Cast[destinationAddressUpdater](conn); loaded {
+		remoteAddr := M.AddrFromNet(remoteConn.RemoteAddr())
+		var resolvedAddr netip.Addr
+		if len(metadata.DestinationAddresses) > 0 {
+			resolvedAddr = metadata.DestinationAddresses[0]
+		}
+		updater.UpdateDestinationAddress(remoteAddr, resolvedAddr)
 	}
 	err = N.ReportConnHandshakeSuccess(conn, remoteConn)
 	if err != nil {
@@ -246,6 +258,13 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			m.logger.ErrorContext(ctx, err)
 			return
 		}
+	}
+	if updater, loaded := common.Cast[destinationAddressUpdater](conn); loaded {
+		var resolvedAddr netip.Addr
+		if len(metadata.DestinationAddresses) > 0 {
+			resolvedAddr = metadata.DestinationAddresses[0]
+		}
+		updater.UpdateDestinationAddress(destinationAddress, resolvedAddr)
 	}
 	err = N.ReportPacketConnHandshakeSuccess(conn, remotePacketConn)
 	if err != nil {

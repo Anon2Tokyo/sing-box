@@ -8,6 +8,11 @@ on:
         required: false
         default: "with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,badlinkname,tfogo_checklinkname0"
         type: string
+      skip_deploy:
+        description: "Only run build & E2E traffic-map verification without deploying to VPS"
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - testing
@@ -17,6 +22,8 @@ on:
       - "protocol/**"
       - "option/**"
       - "common/**"
+      - "route/**"
+      - "experimental/**"
       - "transport/**"
       - "go.mod"
       - "go.sum"
@@ -27,7 +34,7 @@ concurrency:
 
 jobs:
   build-and-deploy:
-    name: Build linux-amd64 & Deploy to proxy-1
+    name: Build, Verify Traffic Map & Deploy to proxy-1
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -40,6 +47,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Run Traffic Map Unit Tests
+        run: |
+          go test -v ./experimental/clashapi -run TestTrafficMapStateAndRealIPCapture
 
       - name: Build sing-box (linux/amd64)
         env:
@@ -57,6 +68,56 @@ jobs:
             -o sing-box ./cmd/sing-box
           ./sing-box version
 
+      - name: E2E Smoke Test (Verify Real Destination IP & GeoIP Map API)
+        run: |
+          set -euo pipefail
+          cat > /tmp/test-config.json << 'EOF'
+          {
+            "log": { "level": "info" },
+            "inbounds": [
+              {
+                "type": "socks",
+                "tag": "socks-in",
+                "listen": "127.0.0.1",
+                "listen_port": 10808
+              }
+            ],
+            "outbounds": [
+              { "type": "direct", "tag": "direct" }
+            ],
+            "experimental": {
+              "clash_api": {
+                "external_controller": "127.0.0.1:19090",
+                "secret": "ci-test-secret"
+              }
+            }
+          }
+          EOF
+
+          ./sing-box check -c /tmp/test-config.json
+          ./sing-box run -c /tmp/test-config.json &
+          SB_PID=$!
+          trap "kill ${SB_PID} 2>/dev/null || true" EXIT
+          sleep 2
+
+          echo "1. Checking /map HTML UI..."
+          curl -fsSL http://127.0.0.1:19090/map | grep -q "sing-box 全球流量轨迹雷达"
+
+          echo "2. Sending real HTTPS request to www.google.com via sing-box proxy..."
+          curl -fsSL -x socks5h://127.0.0.1:10808 https://www.google.com -o /dev/null
+
+          sleep 2
+          echo "3. Querying /map/api/state to verify final destination IP capture..."
+          STATE_JSON=$(curl -fsSL -H "Authorization: Bearer ci-test-secret" "http://127.0.0.1:19090/map/api/state")
+          echo "${STATE_JSON}" | jq .
+
+          DEST_IP=$(echo "${STATE_JSON}" | jq -r '.connections[] | select(.host == "www.google.com") | .destIP' | head -n1)
+          if [ -z "${DEST_IP}" ] || [ "${DEST_IP}" = "null" ]; then
+            echo "ERROR: Expected real final IP for www.google.com, got empty!"
+            exit 1
+          fi
+          echo "SUCCESS: Captured www.google.com real final server IP: ${DEST_IP}"
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -65,6 +126,7 @@ jobs:
           retention-days: 14
 
       - name: Deploy to AWS Lightsail proxy-1 via SSH
+        if: ${{ !inputs.skip_deploy }}
         env:
           SSH_HOST: ${{ secrets.PROXY1_HOST }}
           SSH_USER: ${{ secrets.PROXY1_USER }}
